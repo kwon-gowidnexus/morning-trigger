@@ -1,0 +1,69 @@
+name: morning-trigger
+
+# 아침 보고 정시 요청기 (2026-10-28, KYI "첫째 안 진행해").
+# kwon-gowidnexus/claude 의 아침 보고 세 워크플로(daily-fortune 06:30 · newsletter-digest 07:00 · checkpoint-reporter 08:00 KST)를
+# 정시에 workflow_dispatch 로 요청한다. GitHub 정기 실행은 79~289분 늦게 뜨고(2026-10-27 실측 30회), 자주 뜨는 예약은 칸이
+# 버려져 간격과 무관하게 하루 2~3회만 뜬다(5분·15분·20분 간격 모두, 2026-10-26~28 실측). 그래서 '일찍 깨어나 정시까지 기다리는'
+# 하루 한 번의 긴 작업으로 시각을 맞춘다. 공개 저장소라 실행 시간이 무료다(비공개 저장소에서는 대기 시간이 월 2,000분 한도에 잡힌다).
+# 요청은 예약과 달리 몇 초 안에 시작한다. 중복 발송은 대상 워크플로의 같은 날 가드가 막고, 이 작업도 잠들기 전·깬 뒤 두 번
+# 오늘 실행이 있는지 보고 있으면 요청하지 않는다. GitHub 예약이 통째로 멈춘 날은 claude 저장소의 morning-heartbeat 와 예비 cron 이 뒤를 받친다.
+on:
+  schedule:
+    - cron: '30 17 * * *'   # KST 02:30 — 실제 기동 03:49~07:19 예상(지연 79~289분). 정시를 지나서 깨면 그 자리에서 바로 요청
+  workflow_dispatch:
+    inputs:
+      now:
+        description: '정시까지 기다리지 않고 바로 판단·요청 (검증용)'
+        type: boolean
+        default: false
+      force:
+        description: '쉼표로 적은 워크플로를 오늘 실행 여부와 무관하게 요청 (검증용, 예: newsletter-digest.yml)'
+        type: string
+        default: ''
+      targets:
+        description: '쉼표로 적은 대상만 처리 (비우면 세 건 전부)'
+        type: string
+        default: ''
+
+permissions:
+  contents: write   # 활동 기록 커밋 — 공개 저장소는 60일 동안 활동이 없으면 예약이 자동으로 꺼진다
+
+# 늦게 뜬 예약과 수동 실행이 겹치면 줄 세운다 — 뒤의 실행은 앞 실행이 만든 요청을 '오늘 실행 있음'으로 보고 건너뛴다
+concurrency:
+  group: morning-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 작업당 상한 6시간 안. 지연 0분이면 02:30 기동 → 08:00 마지막 요청 = 330분
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait until due, then dispatch
+        env:
+          MORNING_TRIGGER_TOKEN: ${{ secrets.MORNING_TRIGGER_TOKEN }}   # claude 저장소 한정 · Actions 읽기/쓰기 · 1년 만료
+          NOW: ${{ inputs.now }}
+          FORCE: ${{ inputs.force }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          ARGS=(--repo kwon-gowidnexus/claude)
+          if [ "$NOW" = "true" ]; then ARGS+=(--now); fi
+          if [ -n "$FORCE" ]; then ARGS+=(--force "$FORCE"); fi
+          if [ -n "$TARGETS" ]; then ARGS+=(--targets "$TARGETS"); fi
+          python3 -X utf8 trigger.py "${ARGS[@]}"
+
+      - name: Record activity (keeps the schedule alive)
+        if: always()
+        env:
+          EVENT: ${{ github.event_name }}
+          STATUS: ${{ job.status }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          line="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M') KST $EVENT $STATUS"
+          echo "$line" >> activity.log
+          tail -n 90 activity.log > activity.tmp && mv activity.tmp activity.log
+          git add activity.log
+          git commit -m "activity: $line" || exit 0
+          git push || (git pull --rebase && git push)
