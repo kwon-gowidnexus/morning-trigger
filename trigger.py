@@ -240,7 +240,7 @@ def main(argv=None) -> int:
     unknown = (set(targets) | force) - set(TARGETS)
     if unknown:
         ap.error(f"목록 밖 워크플로: {', '.join(sorted(unknown))} (허용 {', '.join(TARGETS)})")
-    token = os.environ.get("MORNING_TRIGGER_TOKEN", "")
+    token = os.environ.get("MORNING_TRIGGER_TOKEN", "").strip()   # 비밀값을 stdin으로 넣으면 끝에 줄바꿈이 붙을 수 있다
     if not token:
         log("MORNING_TRIGGER_TOKEN 이 없다 — 요청할 수 없어 종료(2)")
         return 2

@@ -298,6 +298,15 @@ def test_main_requires_token(monkeypatch):
     assert T.main(["--repo", REPO, "--now"]) == 2
 
 
+def test_main_strips_whitespace_around_token(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(T, "make_http", lambda token: seen.__setitem__("token", token) or (lambda *a, **k: (200, {})))
+    monkeypatch.setattr(T, "run_target", lambda wf, **kw: "skipped")
+    monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "  github_pat_x \n")
+    assert T.main(["--repo", REPO, "--now"]) == 0
+    assert seen["token"] == "github_pat_x"   # 비밀값을 stdin으로 넣으면 끝에 줄바꿈이 붙을 수 있다
+
+
 def test_main_force_passes_force_only_to_named_targets(monkeypatch):
     seen = {}
     monkeypatch.setattr(T, "run_target", lambda wf, **kw: seen.__setitem__(wf, kw.get("force")) or "dispatched")
