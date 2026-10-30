@@ -268,7 +268,7 @@ def test_main_processes_targets_in_due_order_and_returns_zero(monkeypatch):
     monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "x")
     rc = T.main(["--repo", REPO, "--now"])
     assert rc == 0
-    assert order == ["daily-fortune.yml", "newsletter-digest.yml", "checkpoint-reporter.yml"]
+    assert order == ["daily-fortune.yml", "newsletter-digest.yml", "realty-watch.yml", "checkpoint-reporter.yml", "realty-watch-close.yml"]
 
 
 def test_main_targets_filter_limits_to_named_workflows(monkeypatch):
@@ -287,7 +287,7 @@ def test_main_rejects_unknown_target(monkeypatch):
 
 
 def test_main_returns_one_when_any_target_failed(monkeypatch):
-    results = iter(["dispatched", "failed", "skipped"])
+    results = iter(["dispatched", "failed", "skipped", "skipped", "dry-run"])   # 대상 다섯(2026-10-30)
     monkeypatch.setattr(T, "run_target", lambda wf, **kw: next(results))
     monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "x")
     assert T.main(["--repo", REPO, "--now"]) == 1
@@ -312,7 +312,8 @@ def test_main_force_passes_force_only_to_named_targets(monkeypatch):
     monkeypatch.setattr(T, "run_target", lambda wf, **kw: seen.__setitem__(wf, kw.get("force")) or "dispatched")
     monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "x")
     T.main(["--repo", REPO, "--now", "--force", "newsletter-digest.yml"])
-    assert seen == {"daily-fortune.yml": False, "newsletter-digest.yml": True, "checkpoint-reporter.yml": False}
+    assert seen == {"daily-fortune.yml": False, "newsletter-digest.yml": True, "realty-watch.yml": False,
+                    "checkpoint-reporter.yml": False, "realty-watch-close.yml": False}
 
 
 # ── 워크플로 파일 덮개 ───────────────────────────────────────────────────────
@@ -321,7 +322,7 @@ def test_workflow_cron_wakes_at_0230_kst_and_job_ends_inside_six_hours():
     path = os.path.join(ROOT, ".github", "workflows", "morning-trigger.yml")
     with open(path, encoding="utf-8") as f:
         yml = f.read()
-    assert re.search(r"cron:\s*'30 17 \* \* \*'", yml), "cron은 UTC 17:30 = KST 02:30 한 줄이어야 한다"
+    assert re.search(r"cron:\s*'30 17 \* \* \*'", yml), "아침 cron은 UTC 17:30 = KST 02:30"
     m = re.search(r"timeout-minutes:\s*(\d+)", yml)
     assert m and int(m.group(1)) <= 350
     assert "workflow_dispatch" in yml
@@ -330,4 +331,77 @@ def test_workflow_cron_wakes_at_0230_kst_and_job_ends_inside_six_hours():
 
 
 def test_targets_match_private_repo_due_times():
-    assert T.TARGETS == {"daily-fortune.yml": "06:30", "newsletter-digest.yml": "07:00", "checkpoint-reporter.yml": "08:00"}
+    # claude 저장소 scripts/gha_dispatch.py TARGETS 와 같아야 한다(두 벌 — 한쪽만 바뀐 날 정시가 어긋난다)
+    assert T.TARGETS == {"daily-fortune.yml": "06:30", "newsletter-digest.yml": "07:00", "realty-watch.yml": "07:40",
+                         "checkpoint-reporter.yml": "08:00", "realty-watch-close.yml": "16:20"}
+
+
+# ── 부동산주식 두 슬롯 · 아침/오후 작업 분리 · 주말 · dry-run (2026-10-30) ──
+
+def test_targets_include_realty_slots():
+    assert T.TARGETS["realty-watch.yml"] == "07:40" and T.TARGETS["realty-watch-close.yml"] == "16:20"
+    assert T.job_of("realty-watch-close.yml") == "afternoon" and T.job_of("daily-fortune.yml") == "morning"
+
+
+def test_targets_for_job_in_due_order():
+    assert T.targets_for("morning") == ["daily-fortune.yml", "newsletter-digest.yml", "realty-watch.yml", "checkpoint-reporter.yml"]
+    assert T.targets_for("afternoon") == ["realty-watch-close.yml"]
+    assert T.targets_for("all") == T.targets_for("morning") + T.targets_for("afternoon")
+
+
+def test_runs_on_weekdays_only_for_realty():
+    sat = kst(2026, 10, 31, 9, 0).date()
+    assert T.runs_on("realty-watch.yml", sat) is False and T.runs_on("daily-fortune.yml", sat) is True
+    assert T.runs_on("realty-watch-close.yml", kst(2026, 10, 30, 9, 0).date()) is True
+
+
+def test_decide_skips_realty_on_weekend():
+    action, wait_s, reason = T.decide("realty-watch.yml", kst(2026, 10, 31, 4, 10), [])
+    assert action == "skip" and wait_s == 0 and "주말" in reason
+
+
+def test_main_job_filter_limits_targets(monkeypatch):
+    order = []
+    monkeypatch.setattr(T, "run_target", lambda wf, **kw: order.append(wf) or "skipped")
+    monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "x")
+    assert T.main(["--repo", REPO, "--now", "--job", "afternoon"]) == 0
+    assert order == ["realty-watch-close.yml"]
+
+
+def test_main_dry_run_never_dispatches(monkeypatch):
+    seen = {}
+
+    def fake_run_target(wf, **kw):
+        seen[wf] = kw["dispatch_fn"](wf)   # dry-run 요청기는 보내지 않고 0을 돌려준다
+        return "skipped"
+
+    def boom(*a, **k):
+        raise AssertionError("dry-run인데 요청했다")
+
+    monkeypatch.setattr(T, "run_target", fake_run_target)
+    monkeypatch.setattr(T, "dispatch", boom)
+    monkeypatch.setenv("MORNING_TRIGGER_TOKEN", "x")
+    assert T.main(["--repo", REPO, "--now", "--dry-run"]) == 0
+    assert set(seen) == set(T.TARGETS) and all(v == 0 for v in seen.values())
+
+
+def test_workflow_crons_match_job_crons_and_step_routes_by_schedule():
+    path = os.path.join(ROOT, ".github", "workflows", "morning-trigger.yml")
+    with open(path, encoding="utf-8") as f:
+        yml = f.read()
+    crons = re.findall(r"cron:\s*'([^']+)'", yml)
+    assert sorted(crons) == sorted(T.JOB_CRONS.values()), f"워크플로 cron {crons} ≠ JOB_CRONS {T.JOB_CRONS}"
+    assert T.JOB_CRONS == {"morning": "30 17 * * *", "afternoon": "0 2 * * 1-5"}   # KST 02:30 매일 · KST 11:00 월~금
+    for cron in T.JOB_CRONS.values():
+        assert yml.count(cron) >= 2, f"{cron!r}: schedule 줄과 --job 분기(case) 양쪽에 있어야 한다"
+    assert "github.event.schedule" in yml and "--job" in yml and "dry_run" in yml
+
+
+def test_each_job_reaches_its_targets_within_the_wait_cap():
+    # 작업이 깬 시각(cron, 지연 0)이 그 작업의 가장 이른 정시보다 앞이고, 가장 늦은 정시까지가 대기 상한·작업 제한(350분) 안이어야 잠들어 맞춘다
+    for job, cron in T.JOB_CRONS.items():
+        minute, hour = (int(x) for x in cron.split()[:2])
+        wake = (hour * 60 + minute + 9 * 60) % (24 * 60)
+        dues = [int(T.TARGETS[w][:2]) * 60 + int(T.TARGETS[w][3:]) for w in T.targets_for(job)]
+        assert wake < min(dues), f"{job}: 기동 {wake // 60:02d}:{wake % 60:02d}이 가장 이른 정시보다 늦다"
+        assert max(dues) - wake <= min(T.MAX_WAIT_S // 60, 350), f"{job}: 가장 늦은 정시까지 {max(dues) - wake}분"

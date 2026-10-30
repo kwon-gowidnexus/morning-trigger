@@ -1,19 +1,30 @@
 name: morning-trigger
 
-# 아침 보고 정시 요청기 (2026-10-28, KYI "첫째 안 진행해").
-# kwon-gowidnexus/claude 의 아침 보고 세 워크플로(daily-fortune 06:30 · newsletter-digest 07:00 · checkpoint-reporter 08:00 KST)를
-# 정시에 workflow_dispatch 로 요청한다. GitHub 정기 실행은 79~289분 늦게 뜨고(2026-10-27 실측 30회), 자주 뜨는 예약은 칸이
-# 버려져 간격과 무관하게 하루 2~3회만 뜬다(5분·15분·20분 간격 모두, 2026-10-26~28 실측). 그래서 '일찍 깨어나 정시까지 기다리는'
-# 하루 한 번의 긴 작업으로 시각을 맞춘다. 공개 저장소라 실행 시간이 무료다(비공개 저장소에서는 대기 시간이 월 2,000분 한도에 잡힌다).
-# 요청은 예약과 달리 몇 초 안에 시작한다. 중복 발송은 대상 워크플로의 같은 날 가드가 막고, 이 작업도 잠들기 전·깬 뒤 두 번
-# 오늘 실행이 있는지 보고 있으면 요청하지 않는다. GitHub 예약이 통째로 멈춘 날은 claude 저장소의 morning-heartbeat 와 예비 cron 이 뒤를 받친다.
+# 아침 보고·부동산주식 정시 요청기 (2026-10-28, KYI "첫째 안 진행해" · 2026-10-30 오후 작업 추가).
+# kwon-gowidnexus/claude 의 워크플로를 정시에 workflow_dispatch 로 요청한다 — 아침 작업: daily-fortune 06:30 · newsletter-digest 07:00 ·
+# realty-watch 07:40(평일) · checkpoint-reporter 08:00 KST / 오후 작업: realty-watch-close 16:20 KST(평일). 시각은 trigger.py TARGETS.
+# GitHub 정기 실행은 79~289분(2026-10-29~30 실측 최대 7시간) 늦게 뜨고, 자주 뜨는 예약은 칸이 버려져 간격과 무관하게 하루 2~3회만 뜬다
+# (5분·15분·20분 간격 모두, 2026-10-26~28 실측). 그래서 '일찍 깨어나 정시까지 기다리는' 긴 작업으로 시각을 맞춘다. 공개 저장소라 실행 시간이
+# 무료다(비공개 저장소에서는 대기 시간이 월 2,000분 한도에 잡힌다). 요청은 예약과 달리 몇 초 안에 시작한다. 중복 발송은 대상 워크플로의
+# 같은 날 가드가 막고, 이 작업도 잠들기 전·깬 뒤 두 번 오늘 실행이 있는지 보고 있으면 요청하지 않는다. GitHub 예약이 통째로 멈춘 날은
+# claude 저장소의 morning-heartbeat(아침)와 각 워크플로의 예비 cron 이 뒤를 받친다.
 on:
   schedule:
-    - cron: '30 17 * * *'   # KST 02:30 — 실제 기동 03:49~07:19 예상(지연 79~289분). 정시를 지나서 깨면 그 자리에서 바로 요청
+    - cron: '30 17 * * *'   # 아침 작업 — KST 02:30 매일. 실제 기동 03:49~07:19 예상(지연 79~289분). 정시를 지나서 깨면 그 자리에서 바로 요청
+    - cron: '0 2 * * 1-5'   # 오후 작업 — KST 11:00 월~금. 16:20 마감까지 320분 대기(작업 제한 350분 안). trigger.py JOB_CRONS 와 같아야 한다
   workflow_dispatch:
     inputs:
+      job:
+        description: '어느 작업의 대상을 처리할지 (morning: 06:30~08:00 · afternoon: 16:20 · all)'
+        type: choice
+        options: [morning, afternoon, all]
+        default: morning
       now:
         description: '정시까지 기다리지 않고 바로 판단·요청 (검증용)'
+        type: boolean
+        default: false
+      dry_run:
+        description: '판단만 찍고 요청하지 않음 (검증용)'
         type: boolean
         default: false
       force:
@@ -21,7 +32,7 @@ on:
         type: string
         default: ''
       targets:
-        description: '쉼표로 적은 대상만 처리 (비우면 세 건 전부)'
+        description: '쉼표로 적은 대상만 처리 (비우면 job 의 대상 전부, 적으면 job 보다 우선)'
         type: string
         default: ''
 
@@ -36,19 +47,28 @@ concurrency:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # 작업당 상한 6시간 안. 지연 0분이면 02:30 기동 → 08:00 마지막 요청 = 330분
+    timeout-minutes: 350   # 작업당 상한 6시간 안. 아침: 02:30 기동 → 08:00 마지막 요청 = 330분 · 오후: 11:00 기동 → 16:20 = 320분
     steps:
       - uses: actions/checkout@v4
 
       - name: Wait until due, then dispatch
         env:
           MORNING_TRIGGER_TOKEN: ${{ secrets.MORNING_TRIGGER_TOKEN }}   # claude 저장소 한정 · Actions 읽기/쓰기 · 1년 만료
+          SCHEDULE: ${{ github.event.schedule }}   # 예약 실행이면 어느 cron 이 깨웠는지 — 그것이 작업(job)을 정한다
+          JOB_IN: ${{ inputs.job }}
           NOW: ${{ inputs.now }}
+          DRY: ${{ inputs.dry_run }}
           FORCE: ${{ inputs.force }}
           TARGETS: ${{ inputs.targets }}
         run: |
-          ARGS=(--repo kwon-gowidnexus/claude)
+          case "$SCHEDULE" in
+            '30 17 * * *') JOB=morning ;;
+            '0 2 * * 1-5') JOB=afternoon ;;
+            *) JOB="${JOB_IN:-morning}" ;;
+          esac
+          ARGS=(--repo kwon-gowidnexus/claude --job "$JOB")
           if [ "$NOW" = "true" ]; then ARGS+=(--now); fi
+          if [ "$DRY" = "true" ]; then ARGS+=(--dry-run); fi
           if [ -n "$FORCE" ]; then ARGS+=(--force "$FORCE"); fi
           if [ -n "$TARGETS" ]; then ARGS+=(--targets "$TARGETS"); fi
           python3 -X utf8 trigger.py "${ARGS[@]}"
