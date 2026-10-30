@@ -405,3 +405,11 @@ def test_each_job_reaches_its_targets_within_the_wait_cap():
         dues = [int(T.TARGETS[w][:2]) * 60 + int(T.TARGETS[w][3:]) for w in T.targets_for(job)]
         assert wake < min(dues), f"{job}: 기동 {wake // 60:02d}:{wake % 60:02d}이 가장 이른 정시보다 늦다"
         assert max(dues) - wake <= min(T.MAX_WAIT_S // 60, 350), f"{job}: 가장 늦은 정시까지 {max(dues) - wake}분"
+
+
+def test_has_live_run_today_ignores_dry_run_titled_runs():
+    # 검증용 dry-run 실행(run-name 에 'dry-run')은 성공으로 끝나도 '보낸 것'이 아니다 — 세면 그날 진짜 요청을 건너뛴다
+    now = kst(2026, 10, 30, 16, 20)
+    r = run(kst(2026, 10, 30, 13, 5), event="workflow_dispatch")
+    r["display_title"] = "realty-watch-close dry-run"
+    assert T.has_live_run_today([r], now) is False

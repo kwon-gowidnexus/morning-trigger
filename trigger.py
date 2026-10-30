@@ -52,6 +52,7 @@ API = "https://api.github.com"
 DEFAULT_REPO = "kwon-gowidnexus/claude"
 DEFAULT_REF = "main"
 DONE = {"success", "neutral", "skipped"}   # 끝났고 '보낸 것'으로 치는 결론
+DRY_MARK = "dry-run"                      # 대상 워크플로 run-name 이 검증용 실행에 붙이는 표식(display_title) — 보낸 것으로 세지 않는다
 CONFIRM_WINDOW_S = 60                      # 요청 뒤 실행 생성 확인 창
 CONFIRM_POLL_S = 5
 MAX_WAIT_S = 6 * 3600                      # 작업당 상한(6시간) 안에서만 잠든다
@@ -110,12 +111,16 @@ def runs_on(wf: str, day) -> bool:
 
 # ── 판단 ────────────────────────────────────────────────────────────────────
 
+def _dry(run: dict) -> bool:
+    return DRY_MARK in str(run.get("display_title") or "")
+
+
 def has_live_run_today(runs: list, now_kst: datetime) -> bool:
-    """오늘(KST 0시 이후) 만들어진 실행 중 진행 중이거나 성공으로 끝난 것이 있는가."""
+    """오늘(KST 0시 이후) 만들어진 실행 중 진행 중이거나 성공으로 끝난 것이 있는가(검증용 dry-run 은 빼고)."""
     start = day_start_utc(now_kst)
     for r in runs:
         c = _created(r)
-        if c is None or c < start:
+        if c is None or c < start or _dry(r):
             continue
         if r.get("status") != "completed" or r.get("conclusion") in DONE:
             return True
@@ -126,7 +131,7 @@ def _live_desc(runs: list, now_kst: datetime) -> str:
     start = day_start_utc(now_kst)
     for r in runs:
         c = _created(r)
-        if c is not None and c >= start and (r.get("status") != "completed" or r.get("conclusion") in DONE):
+        if c is not None and c >= start and not _dry(r) and (r.get("status") != "completed" or r.get("conclusion") in DONE):
             return f"{r.get('event')} {_hhmm(c)} {r.get('status')}/{r.get('conclusion')}"
     return ""
 
